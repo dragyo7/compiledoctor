@@ -38,3 +38,14 @@ htmlcov/
 
 # Temporary
 *.tmp
+
+
+
+venv/
+__pycache__/
+*.pyc
+.history/
+.vscode/
+.qodo/
+
+
