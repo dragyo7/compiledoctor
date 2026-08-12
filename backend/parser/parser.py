@@ -1,22 +1,23 @@
 """
-CompileDoctor Parser
-====================
-
 Syntax analyzer for the CompileDoctor educational compiler.
 
 Responsibilities:
+
 - Consume tokens produced by the lexer.
 - Validate source code against the language grammar.
 - Construct the Abstract Syntax Tree (AST).
 - Apply operator precedence.
-- Report basic syntax errors.
+- Report syntax errors.
+- Record recoverable syntax errors.
 
 The parser does not perform:
+
 - Semantic analysis
 - Type checking
 - Symbol-table validation
 - Final diagnostic formatting
-- Advanced error recovery
+- Semantic diagnostic formatting
+- Automatic source-code repair
 """
 
 import ply.yacc as yacc
@@ -33,6 +34,7 @@ from backend.ast_nodes.nodes import UnaryExpression
 from backend.ast_nodes.nodes import VariableDeclaration
 from backend.constants import TOKENS
 from backend.lexer.lexer import CompileDoctorLexer
+from backend.recovery.recovery import ErrorRecovery
 
 
 class CompileDoctorParser:
@@ -73,13 +75,16 @@ class CompileDoctorParser:
 
     def __init__(self):
         """
-        Initialize the lexer and parser state.
+        Initialize the lexer, parser, and recovery manager.
         """
 
         self.lexer = CompileDoctorLexer()
         self.lexer.build()
 
         self.parser = None
+
+        # Stores syntax errors generated during parsing.
+        self.recovery = ErrorRecovery()
 
     # ==========================================================
     # Type Specifier
@@ -118,8 +123,7 @@ class CompileDoctorParser:
         function_list : function_list function
         """
 
-        production[1].append(production[2])
-        production[0] = production[1]
+        production[0] = production[1] + [production[2]]
 
     def p_function_list_single(self, production):
         """
@@ -129,7 +133,7 @@ class CompileDoctorParser:
         production[0] = [production[1]]
 
     # ==========================================================
-    # Function Definition
+    # Function
     # ==========================================================
 
     def p_function(self, production):
@@ -150,10 +154,16 @@ class CompileDoctorParser:
     def p_compound_statement(self, production):
         """
         compound_statement : LBRACE statement_list RBRACE
+                            | LBRACE RBRACE
         """
 
+        if len(production) == 4:
+            statements = production[2]
+        else:
+            statements = []
+
         production[0] = Block(
-            statements=production[2]
+            statements=statements
         )
 
     # ==========================================================
@@ -165,8 +175,7 @@ class CompileDoctorParser:
         statement_list : statement_list statement
         """
 
-        production[1].append(production[2])
-        production[0] = production[1]
+        production[0] = production[1] + [production[2]]
 
     def p_statement_list_single(self, production):
         """
@@ -175,20 +184,13 @@ class CompileDoctorParser:
 
         production[0] = [production[1]]
 
-    def p_statement_list_empty(self, production):
-        """
-        statement_list :
-        """
-
-        production[0] = []
-
     # ==========================================================
     # Statements
     # ==========================================================
 
     def p_statement(self, production):
         """
-        statement : declaration_statement
+        statement : variable_declaration
                   | assignment_statement
                   | return_statement
                   | expression_statement
@@ -200,23 +202,27 @@ class CompileDoctorParser:
     # Variable Declaration
     # ==========================================================
 
-    def p_declaration_statement(self, production):
+    def p_variable_declaration_initialized(self, production):
         """
-        declaration_statement : type_specifier IDENTIFIER SEMICOLON
-                              | type_specifier IDENTIFIER ASSIGN expression SEMICOLON
+        variable_declaration : type_specifier IDENTIFIER ASSIGN expression SEMICOLON
         """
 
-        if len(production) == 4:
-            production[0] = VariableDeclaration(
-                variable_type=production[1],
-                name=production[2],
-            )
-        else:
-            production[0] = VariableDeclaration(
-                variable_type=production[1],
-                name=production[2],
-                initializer=production[4],
-            )
+        production[0] = VariableDeclaration(
+            variable_type=production[1],
+            name=production[2],
+            initializer=production[4],
+        )
+
+    def p_variable_declaration_uninitialized(self, production):
+        """
+        variable_declaration : type_specifier IDENTIFIER SEMICOLON
+        """
+
+        production[0] = VariableDeclaration(
+            variable_type=production[1],
+            name=production[2],
+            initializer=None,
+        )
 
     # ==========================================================
     # Assignment
@@ -236,18 +242,23 @@ class CompileDoctorParser:
     # Return Statement
     # ==========================================================
 
-    def p_return_statement(self, production):
+    def p_return_statement_expression(self, production):
         """
-        return_statement : RETURN SEMICOLON
-                         | RETURN expression SEMICOLON
+        return_statement : RETURN expression SEMICOLON
         """
 
-        if len(production) == 3:
-            production[0] = ReturnStatement()
-        else:
-            production[0] = ReturnStatement(
-                expression=production[2]
-            )
+        production[0] = ReturnStatement(
+            expression=production[2]
+        )
+
+    def p_return_statement_empty(self, production):
+        """
+        return_statement : RETURN SEMICOLON
+        """
+
+        production[0] = ReturnStatement(
+            expression=None
+        )
 
     # ==========================================================
     # Expression Statement
@@ -261,7 +272,7 @@ class CompileDoctorParser:
         production[0] = production[1]
 
     # ==========================================================
-    # Binary Expressions
+    # Expressions
     # ==========================================================
 
     def p_expression_binary(self, production):
@@ -271,12 +282,12 @@ class CompileDoctorParser:
                    | expression TIMES expression
                    | expression DIVIDE expression
                    | expression MODULO expression
-                   | expression EQUAL expression
-                   | expression NOT_EQUAL expression
                    | expression LESS_THAN expression
                    | expression LESS_EQUAL expression
                    | expression GREATER_THAN expression
                    | expression GREATER_EQUAL expression
+                   | expression EQUAL expression
+                   | expression NOT_EQUAL expression
                    | expression AND expression
                    | expression OR expression
         """
@@ -291,23 +302,41 @@ class CompileDoctorParser:
     # Unary Expressions
     # ==========================================================
 
-    def p_expression_unary(self, production):
+    def p_expression_unary_minus(self, production):
         """
-        expression : NOT expression
-                   | MINUS expression %prec UMINUS
-                   | PLUS expression %prec UPLUS
+        expression : MINUS expression %prec UMINUS
         """
 
         production[0] = UnaryExpression(
-            operator=production[1],
+            operator="-",
+            operand=production[2],
+        )
+
+    def p_expression_unary_plus(self, production):
+        """
+        expression : PLUS expression %prec UPLUS
+        """
+
+        production[0] = UnaryExpression(
+            operator="+",
+            operand=production[2],
+        )
+
+    def p_expression_not(self, production):
+        """
+        expression : NOT expression
+        """
+
+        production[0] = UnaryExpression(
+            operator="!",
             operand=production[2],
         )
 
     # ==========================================================
-    # Parenthesized Expressions
+    # Parenthesized Expression
     # ==========================================================
 
-    def p_expression_group(self, production):
+    def p_expression_grouped(self, production):
         """
         expression : LPAREN expression RPAREN
         """
@@ -342,7 +371,7 @@ class CompileDoctorParser:
         )
 
     # ==========================================================
-    # Floating-point Literal
+    # Floating-Point Literal
     # ==========================================================
 
     def p_expression_float(self, production):
@@ -386,24 +415,29 @@ class CompileDoctorParser:
     def p_error(self, token):
         """
         Handle syntax errors detected by PLY.
+
+        Syntax errors are recorded through the recovery layer.
+        The parser does not modify the source code.
         """
 
         if token is None:
-            print(
-                "\nSyntax Error"
-                "\n------------"
-                "\nUnexpected end of input."
+            self.recovery.record_error(
+                message="Unexpected end of input.",
             )
+
             return
 
-        print(
-            "\nSyntax Error"
-            "\n------------"
-            f"\nLine       : {token.lineno}"
-            f"\nColumn     : {self.find_column(token)}"
-            f"\nUnexpected : '{token.value}'"
+        column = self.find_column(token)
+
+        self.recovery.record_error(
+            message=f"Unexpected token '{token.value}'.",
+            line=token.lineno,
+            column=column,
+            token_type=token.type,
+            token_value=token.value,
         )
 
+        # Tell PLY that the current syntax error has been handled.
         self.parser.errok()
 
     # ==========================================================
@@ -449,6 +483,9 @@ class CompileDoctorParser:
     def parse(self, source_code):
         """
         Parse source code and return its AST.
+
+        Syntax errors encountered during parsing are stored
+        by the recovery manager.
         """
 
         if self.parser is None:
@@ -456,6 +493,9 @@ class CompileDoctorParser:
                 "Parser has not been built. "
                 "Call build() first."
             )
+
+        # Remove errors from any previous parse operation.
+        self.recovery.clear()
 
         return self.parser.parse(
             source_code,
