@@ -40,8 +40,11 @@ class SemanticError:
     Represents a semantic error detected during analysis.
 
     Attributes:
-        error_type: Short category describing the error.
-        message: Human-readable description of the problem.
+        error_type:
+            Short category describing the error.
+
+        message:
+            Human-readable description of the problem.
     """
 
     def __init__(self, error_type, message):
@@ -55,6 +58,19 @@ class SemanticError:
             f"message='{self.message}'"
             f")"
         )
+
+    def to_dict(self):
+        """
+        Convert the semantic error into a serializable dictionary.
+
+        Returns:
+            Dictionary containing the error category and message.
+        """
+
+        return {
+            "error_type": self.error_type,
+            "message": self.message,
+        }
 
 
 class SemanticAnalyzer:
